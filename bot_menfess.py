@@ -10,6 +10,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 API_TOKEN = os.environ.get('API_TOKEN', 'ISI_TOKEN_BOT_ANDA')
 MOD_GROUP_ID = int(os.environ.get('MOD_GROUP_ID', '-100111111111'))
 PUBLIC_GROUP_ID = int(os.environ.get('PUBLIC_GROUP_ID', '-100222222222'))
+PUBLIC_GROUP_LINK = os.environ.get('PUBLIC_GROUP_LINK', 'https://t.me/username_grup')
 OWNER_ID = int(os.environ.get('OWNER_ID', '123456789'))
 CHANNEL_ID = os.environ.get('CHANNEL_ID', '@username_channel')
 CHANNEL_LINK = os.environ.get('CHANNEL_LINK', 'https://t.me/username_channel')
@@ -38,27 +39,50 @@ def get_all_users():
     with open(USERS_FILE, "r") as f:
         return [line.strip() for line in f if line.strip()]
 
-def is_subscribed(user_id):
+def check_membership(user_id):
     if user_id == OWNER_ID:
-        return True
+        return True, True
+    
+    in_channel = True
+    in_group = True
+    
     try:
-        member = bot.get_chat_member(CHANNEL_ID, user_id)
-        return member.status in ['creator', 'administrator', 'member']
+        member_ch = bot.get_chat_member(CHANNEL_ID, user_id)
+        in_channel = member_ch.status in ['creator', 'administrator', 'member']
     except Exception:
-        return False
+        in_channel = True
 
-# Tombol susun ke bawah (1 kolom per baris) seperti di gambar
-def get_fsub_markup():
+    try:
+        member_gr = bot.get_chat_member(PUBLIC_GROUP_ID, user_id)
+        in_group = member_gr.status in ['creator', 'administrator', 'member']
+    except Exception:
+        in_group = True
+
+    return in_channel, in_group
+
+def get_join_markup(in_channel=False, in_group=False):
     markup = InlineKeyboardMarkup(row_width=1)
-    btn_join = InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK)
-    btn_check = InlineKeyboardButton("🔄 Cek Keanggotaan", callback_data="check_sub")
-    markup.add(btn_join, btn_check)
+    if not in_channel:
+        markup.add(InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK))
+    if not in_group:
+        markup.add(InlineKeyboardButton("👥 Join Grup Utama", url=PUBLIC_GROUP_LINK))
+    markup.add(InlineKeyboardButton("🔄 Cek Keanggotaan", callback_data="check_sub"))
     return markup
 
-def get_channel_only_markup():
+def get_single_channel_markup():
     markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(InlineKeyboardButton("📢 Channel", url=CHANNEL_LINK))
+    markup.add(InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK))
     return markup
+
+def build_post_link(chat_id, message_id):
+    try:
+        chat_info = bot.get_chat(chat_id)
+        if chat_info.username:
+            return f"https://t.me/{chat_info.username}/{message_id}"
+    except Exception:
+        pass
+    clean_id = str(chat_id).replace("-100", "")
+    return f"https://t.me/c/{clean_id}/{message_id}"
 
 # 0. Command /gcast khusus Owner
 @bot.message_handler(commands=['gcast'], func=lambda m: m.from_user.id == OWNER_ID)
@@ -108,7 +132,7 @@ def handle_gcast(message):
         parse_mode="HTML"
     )
 
-# 1. Pesan Start + Wajib Join Channel Penjual
+# 1. Pesan Start + Wajib Join Channel & Grup Utama
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     if message.chat.type == 'private':
@@ -120,41 +144,72 @@ def send_welcome(message):
         else:
             sapaan = html.escape(message.from_user.first_name or "Kak")
 
-        if not is_subscribed(user_id):
+        in_channel, in_group = check_membership(user_id)
+
+        if not in_channel or not in_group:
             teks_wajib = (
-                f"Halo {sapaan}, sebelum mengirim menfess, kamu wajib bergabung ke channel kami terlebih dahulu.\n\n"
-                f"Silakan klik tombol <b>Join Channel</b> di bawah, lalu tekan <b>Cek Keanggotaan</b>."
+                f"Halo {sapaan}, sebelum mengirim menfess, kamu wajib bergabung ke Channel dan Grup Utama kami terlebih dahulu menggunakan tombol di bawah ini.\n\n"
+                f"Setelah bergabung, tekan tombol <b>🔄 Cek Keanggotaan</b>."
             )
-            bot.reply_to(message, make_quote(teks_wajib), parse_mode="HTML", reply_markup=get_fsub_markup())
+            bot.reply_to(
+                message,
+                make_quote(teks_wajib),
+                parse_mode="HTML",
+                reply_markup=get_join_markup(in_channel, in_group)
+            )
             return
 
         teks = f"Halo {sapaan}, Silahkan drop teks, foto, atau video menfess kamu disini"
-        bot.reply_to(message, make_quote(teks), parse_mode="HTML", reply_markup=get_channel_only_markup())
+        bot.reply_to(
+            message,
+            make_quote(teks),
+            parse_mode="HTML",
+            reply_markup=get_single_channel_markup()
+        )
 
-# 1b. Menangani klik tombol "Cek Keanggotaan" di chat pribadi
+# 1b. Tombol Cek Keanggotaan
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
 def handle_check_subscription(call):
     user_id = call.from_user.id
+    save_user(user_id)
+
     if call.from_user.username:
         sapaan = f"@{html.escape(call.from_user.username)}"
     else:
         sapaan = html.escape(call.from_user.first_name or "Kak")
 
-    if is_subscribed(user_id):
-        bot.answer_callback_query(call.id, "✅ Terverifikasi! Kamu sudah bergabung di channel.", show_alert=True)
+    in_channel, in_group = check_membership(user_id)
+
+    if not in_channel or not in_group:
+        belum = []
+        if not in_channel:
+            belum.append("Channel")
+        if not in_group:
+            belum.append("Grup Utama")
+        daftar_belum = " & ".join(belum)
+
+        bot.answer_callback_query(
+            call.id,
+            f"❌ Kamu belum bergabung ke {daftar_belum}! Silakan join dulu lalu klik cek lagi.",
+            show_alert=True
+        )
+        try:
+            bot.edit_message_reply_markup(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=get_join_markup(in_channel, in_group)
+            )
+        except Exception:
+            pass
+    else:
+        bot.answer_callback_query(call.id, "✅ Terverifikasi! Kamu sudah bergabung.")
         teks = f"Halo {sapaan}, Silahkan drop teks, foto, atau video menfess kamu disini"
         bot.edit_message_text(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             text=make_quote(teks),
             parse_mode="HTML",
-            reply_markup=get_channel_only_markup()
-        )
-    else:
-        bot.answer_callback_query(
-            call.id,
-            "❌ Kamu belum bergabung! Silakan klik 'Join Channel' dulu lalu coba cek lagi.",
-            show_alert=True
+            reply_markup=get_single_channel_markup()
         )
 
 # 2. Menangkap menfess dari chat pribadi (private)
@@ -166,12 +221,18 @@ def handle_menfess(message):
     if message.content_type == 'text' and message.text.startswith('/'):
         return
 
-    if not is_subscribed(user_id):
+    in_channel, in_group = check_membership(user_id)
+    if not in_channel or not in_group:
         teks_blokir = (
             f"❌ <b>Menfess belum bisa dikirim!</b>\n"
-            f"Kamu belum bergabung ke channel kami. Klik tombol <b>Join Channel</b> di bawah ini, lalu tekan <b>Cek Keanggotaan</b>:"
+            f"Kamu wajib bergabung ke Channel dan Grup Utama terlebih dahulu menggunakan tombol di bawah ini, lalu tekan <b>🔄 Cek Keanggotaan</b>:"
         )
-        bot.reply_to(message, make_quote(teks_blokir), parse_mode="HTML", reply_markup=get_fsub_markup())
+        bot.reply_to(
+            message,
+            make_quote(teks_blokir),
+            parse_mode="HTML",
+            reply_markup=get_join_markup(in_channel, in_group)
+        )
         return
 
     first_name = message.from_user.first_name or ""
@@ -215,7 +276,7 @@ def handle_menfess(message):
         message,
         make_quote("Menfess kamu sudah masuk ke antrean admin!"),
         parse_mode="HTML",
-        reply_markup=get_channel_only_markup()
+        reply_markup=get_single_channel_markup()
     )
 
 # 3. Menangani klik tombol ACC, Tolak, dan Reply di Grup PV
@@ -247,6 +308,25 @@ def handle_moderation(call):
             except Exception:
                 status_pin = "(Berhasil di-post, gagal pin — cek izin Pin Messages bot)"
 
+            # Membuat link postingan & mengirim notifikasi ke pengirim asli
+            post_link = build_post_link(PUBLIC_GROUP_ID, posted_msg.message_id)
+            try:
+                notif_markup = InlineKeyboardMarkup(row_width=1)
+                notif_markup.add(InlineKeyboardButton("🔗 Lihat Postingan Menfess", url=post_link))
+                teks_notif = (
+                    f"✅ <b>Menfess kamu telah di-ACC oleh admin!</b>\n"
+                    f"Lihat postinganmu di grup utama melalui tombol di bawah ini atau salin link berikut:\n"
+                    f"<code>{post_link}</code>"
+                )
+                bot.send_message(
+                    chat_id=sender_user_id,
+                    text=make_quote(teks_notif),
+                    parse_mode="HTML",
+                    reply_markup=notif_markup
+                )
+            except Exception:
+                pass
+
             new_text = make_quote(f"{old_text_escaped}\n\n✅ <b>Status:</b> Di-ACC oleh {admin_name} {status_pin}")
             bot.edit_message_text(
                 chat_id=MOD_GROUP_ID,
@@ -255,7 +335,7 @@ def handle_moderation(call):
                 parse_mode="HTML",
                 reply_markup=None
             )
-            bot.answer_callback_query(call.id, "Berhasil diposting & disematkan!")
+            bot.answer_callback_query(call.id, "Berhasil diposting, disematkan & link dikirim ke pengirim!")
         except Exception:
             bot.answer_callback_query(call.id, "Gagal memposting. Pastikan bot admin di grup utama.", show_alert=True)
 
@@ -317,5 +397,5 @@ def handle_admin_reply(message):
                 parse_mode="HTML"
             )
 
-print("Bot menfess dengan tombol Join Channel & Cek Keanggotaan berjalan...")
+print("Bot menfess v3 (Dual Force-Sub & Auto-Link ACC) berjalan...")
 bot.infinity_polling()
